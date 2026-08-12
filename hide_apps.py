@@ -26,6 +26,15 @@ SW_SHOW = 5
 SW_MINIMIZE = 6
 SW_RESTORE = 9
 
+# SetWindowPos flags
+SWP_FRAMECHANGED = 0x0020
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_HIDEWINDOW = 0x0080
+SWP_SHOWWINDOW = 0x0040
+
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 
@@ -118,7 +127,7 @@ def load_state():
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"hidden_registry": {}, "hidden_taskbar": {}}
+    return {"hidden_registry": {}, "hidden_taskbar": {}, "hidden_start_menu": {}}
 
 
 def save_state(state):
@@ -269,27 +278,67 @@ def set_window_toolwindow(hwnd, toolwindow: bool):
 
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
 
-    # Force taskbar refresh: briefly hide then show
+    # Force Windows to re-evaluate the window's frame styles.
+    # SetWindowPos with SWP_FRAMECHANGED is critical on Win10/11 —
+    # ShowWindow alone is NOT enough to remove the taskbar button.
+    flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
     if toolwindow:
-        user32.ShowWindow(hwnd, SW_HIDE)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags | SWP_HIDEWINDOW)
         time.sleep(0.05)
-        user32.ShowWindow(hwnd, SW_SHOW)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags | SWP_SHOWWINDOW)
     else:
-        user32.ShowWindow(hwnd, SW_MINIMIZE)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags | SWP_HIDEWINDOW)
         time.sleep(0.05)
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags | SWP_SHOWWINDOW)
 
     return True
 
 # ---------------------------------------------------------------------------
 # System Tray - Notification area icons
 # ---------------------------------------------------------------------------
+
+# NOTIFYICONDATA for Shell_NotifyIcon
+NIM_MODIFY = 0x00000001
+NIM_DELETE = 0x00000002
+NIF_STATE = 0x00000008
+NIS_HIDDEN = 0x00000001
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", ctypes.c_uint),
+        ("uFlags", ctypes.c_uint),
+        ("uCallbackMessage", ctypes.c_uint),
+        ("hIcon", wintypes.HICON),
+        ("szTip", ctypes.c_wchar * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", ctypes.c_wchar * 256),
+        ("uTimeoutOrVersion", ctypes.c_uint),
+        ("szInfoTitle", ctypes.c_wchar * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", ctypes.c_char * 16),
+        ("hBalloonIcon", wintypes.HICON),
+    ]
+
+
+def _find_tray_toolbar(hwnd_parent, *child_classes):
+    """Walk the window hierarchy to find a ToolbarWindow32 child."""
+    user32 = ctypes.windll.user32
+    current = hwnd_parent
+    for cls_name in child_classes:
+        current = user32.FindWindowExW(current, 0, cls_name, None)
+        if not current:
+            return None
+    return current
+
+
 def get_tray_icons():
-    """Enumerate notification area & overflow toolbar icons."""
+    """Enumerate notification area & overflow toolbar icons (Win10/Win11)."""
     user32 = ctypes.windll.user32
     icons = []
 
-    # Helper: enumerate a toolbar's buttons
     def enum_toolbar(tb_hwnd, label):
         if not tb_hwnd:
             return
@@ -303,70 +352,247 @@ def get_tray_icons():
                 if not result:
                     continue
 
-                # Get button info to retrieve command ID
-                bi = TBBUTTONINFOW()
-                bi.cbSize = sizeof(TBBUTTONINFOW)
-                bi.dwMask = TBIF_COMMAND
-                bi.idCommand = tb_btn.idCommand
-                bi.pszText = None
-                bi.cchText = 0
-                _ = user32.SendMessageW(tb_hwnd, TB_GETBUTTONINFOW,
-                                        tb_btn.idCommand, byref(bi))
+                # Try to get the notification icon's owner window
+                owner_hwnd = _get_tray_owner_hwnd(tb_hwnd, tb_btn)
+                proc_name = "Unknown"
+                pid = 0
+                if owner_hwnd:
+                    pid_val = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(owner_hwnd, byref(pid_val))
+                    pid = pid_val.value
+                    proc_name = get_process_name(pid) if pid else f"TrayIcon#{tb_btn.idCommand}"
 
-                # Get the owning window via NIS_HIDDEN message
-                # Try to get window handle from the notification icon data
-                try:
-                    tb_data = TBBUTTONINFOW()
-                    tb_data.cbSize = sizeof(TBBUTTONINFOW)
-                    tb_data.dwMask = TBIF_BYINDEX | 0x00000001  # TBIF_IMAGE | TBIF_STATE
-                    user32.SendMessageW(tb_hwnd, TB_GETBUTTONINFOW, i, byref(tb_data))
-                except Exception:
-                    pass
+                if proc_name == "Unknown" or proc_name.startswith("TrayIcon#"):
+                    proc_name = f"TrayIcon#{tb_btn.idCommand}"
 
                 icons.append({
                     "id_command": tb_btn.idCommand,
                     "index": i,
                     "toolbar_hwnd": tb_hwnd,
                     "label": label,
-                    "process_name": f"TrayIcon#{tb_btn.idCommand}",
-                    "title": f"[{label}] Icon #{tb_btn.idCommand}",
+                    "owner_hwnd": owner_hwnd,
+                    "pid": pid,
+                    "process_name": proc_name,
+                    "title": f"[{label}] {proc_name} (cmd#{tb_btn.idCommand})",
                 })
             except Exception:
                 continue
 
-    # Main notification area
+    # --- Main notification area (Win10 classic & Win11 hidden mirror) ---
     taskbar = user32.FindWindowW("Shell_TrayWnd", None)
     if taskbar:
-        tray_notify = user32.FindWindowExW(taskbar, 0, "TrayNotifyWnd", None)
-        if tray_notify:
-            sys_pager = user32.FindWindowExW(tray_notify, 0, "SysPager", None)
-            if sys_pager:
-                tb_main = user32.FindWindowExW(sys_pager, 0, "ToolbarWindow32", None)
-                enum_toolbar(tb_main, "Tray")
+        tb_main = _find_tray_toolbar(taskbar, "TrayNotifyWnd", "SysPager", "ToolbarWindow32")
+        enum_toolbar(tb_main, "Tray")
 
-    # Overflow (hidden icons popup)
+    # --- Overflow (hidden icons popup) ---
     overflow = user32.FindWindowW("NotifyIconOverflowWindow", None)
     if overflow:
         tb_overflow = user32.FindWindowExW(overflow, 0, "ToolbarWindow32", None)
         enum_toolbar(tb_overflow, "Overflow")
 
+    # --- Win11 secondary tray ---
+    secondary = user32.FindWindowW("Shell_SecondaryTrayWnd", None)
+    if secondary:
+        tb_sec = _find_tray_toolbar(secondary, "TrayNotifyWnd", "SysPager", "ToolbarWindow32")
+        enum_toolbar(tb_sec, "Tray")
+
     return icons
 
 
-def hide_tray_icon(icon, hide: bool):
-    """Hide or show a toolbar button in the notification area."""
+def _get_tray_owner_hwnd(tb_hwnd, tb_btn):
+    """Try to get the owner window HWND from a tray toolbar button's dwData."""
     user32 = ctypes.windll.user32
+    try:
+        # dwData in a tray toolbar button sometimes points to NOTIFYICONDATA,
+        # whose first DWORD field (after cbSize, hWnd) can help.
+        # Another common pattern: dwData IS the hWnd of the owner.
+        if tb_btn.dwData:
+            candidate = wintypes.HWND(tb_btn.dwData)
+            # Verify it looks like a valid window
+            if user32.IsWindow(candidate):
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def hide_tray_icon(icon, hide: bool):
+    """Hide or show a notification-area toolbar button.
+
+    Uses two strategies:
+      1) TB_HIDEBUTTON — classic toolbar message
+      2) Shell_NotifyIcon(NIM_MODIFY, NIS_HIDDEN) — deeper, via the icon owner
+    """
+    user32 = ctypes.windll.user32
+    shell32 = ctypes.windll.shell32
+
     if hide:
-        user32.SendMessageW(icon["toolbar_hwnd"], TB_HIDEBUTTON, icon["id_command"], 1)  # TRUE
-        print(f"  [HIDDEN]  Tray icon #{icon['id_command']} from {icon['label']}")
+        # Strategy 1: toolbar button
+        user32.SendMessageW(icon["toolbar_hwnd"], TB_HIDEBUTTON, icon["id_command"], 1)
+
+        # Strategy 2: NIM_MODIFY with NIS_HIDDEN if we know the owner window
+        if icon.get("owner_hwnd"):
+            nid = NOTIFYICONDATAW()
+            nid.cbSize = sizeof(NOTIFYICONDATAW)
+            nid.hWnd = icon["owner_hwnd"]
+            nid.uID = icon["id_command"]
+            nid.uFlags = NIF_STATE
+            nid.dwState = NIS_HIDDEN
+            nid.dwStateMask = NIS_HIDDEN
+            shell32.Shell_NotifyIconW(NIM_MODIFY, byref(nid))
+
+        print(f"  [HIDDEN]  Tray icon {icon.get('process_name', icon['title'])} from {icon['label']}")
     else:
-        user32.SendMessageW(icon["toolbar_hwnd"], TB_HIDEBUTTON, icon["id_command"], 0)  # FALSE
-        print(f"  [SHOWN]   Tray icon #{icon['id_command']} from {icon['label']}")
+        user32.SendMessageW(icon["toolbar_hwnd"], TB_HIDEBUTTON, icon["id_command"], 0)
+
+        if icon.get("owner_hwnd"):
+            nid = NOTIFYICONDATAW()
+            nid.cbSize = sizeof(NOTIFYICONDATAW)
+            nid.hWnd = icon["owner_hwnd"]
+            nid.uID = icon["id_command"]
+            nid.uFlags = NIF_STATE
+            nid.dwState = 0
+            nid.dwStateMask = NIS_HIDDEN
+            shell32.Shell_NotifyIconW(NIM_MODIFY, byref(nid))
+
+        print(f"  [SHOWN]   Tray icon {icon.get('process_name', icon['title'])} from {icon['label']}")
+
+# ---------------------------------------------------------------------------
+# Start Menu - Hide from Windows Search results
+# ---------------------------------------------------------------------------
+
+def _get_start_menu_dirs():
+    """Return the two main Start Menu Programs directories."""
+    dirs = []
+    all_users = os.path.join(
+        os.environ.get("ALLUSERSPROFILE", "C:\\ProgramData"),
+        "Microsoft\\Windows\\Start Menu\\Programs",
+    )
+    current_user = os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Microsoft\\Windows\\Start Menu\\Programs",
+    )
+    if os.path.isdir(all_users):
+        dirs.append(all_users)
+    if os.path.isdir(current_user):
+        dirs.append(current_user)
+    return dirs
+
+
+def _resolve_shortcut_target(lnk_path):
+    """Resolve a .lnk shortcut to its target path using PowerShell COM."""
+    import subprocess
+    try:
+        escaped = lnk_path.replace("'", "''")
+        cmd = (
+            f"(New-Object -ComObject WScript.Shell)"
+            f".CreateShortcut('{escaped}').TargetPath"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=8,
+        )
+        target = result.stdout.strip()
+        return target if target else None
+    except Exception:
+        return None
+
+
+def get_start_menu_shortcuts(apps):
+    """Find Start Menu shortcuts linked to any of the given installed apps."""
+    shortcuts = []
+    if not apps:
+        return shortcuts
+
+    # Build a set of executable basenames to match against
+    app_names_lower = set()
+    for a in apps:
+        name = a["name"].lower()
+        app_names_lower.add(name)
+        # Also add individual words from the name for broader matching
+        for word in name.split():
+            if len(word) > 2:
+                app_names_lower.add(word)
+
+    seen_paths = set()
+    for base_dir in _get_start_menu_dirs():
+        for root, dirs, files in os.walk(base_dir):
+            for f in files:
+                if not f.lower().endswith(".lnk"):
+                    continue
+                full_path = os.path.join(root, f)
+                if full_path in seen_paths:
+                    continue
+                seen_paths.add(full_path)
+
+                shortcut_name = f[:-4]  # without .lnk
+                target = _resolve_shortcut_target(full_path)
+                if not target:
+                    continue
+
+                target_basename = os.path.splitext(os.path.basename(target))[0].lower()
+                target_dir = os.path.dirname(target).lower()
+
+                # Match: shortcut name or target contains an app name/word
+                matched_app = None
+                name_lower = shortcut_name.lower()
+                for a in apps:
+                    app_name_lower = a["name"].lower()
+                    if app_name_lower in name_lower or app_name_lower in target_dir or app_name_lower in target_basename:
+                        matched_app = a
+                        break
+                    # Also try word-level matching
+                    for word in app_name_lower.split():
+                        if len(word) > 3 and (word in name_lower or word in target_basename):
+                            matched_app = a
+                            break
+                    if matched_app:
+                        break
+
+                if matched_app:
+                    shortcuts.append({
+                        "path": full_path,
+                        "name": shortcut_name,
+                        "target": target,
+                        "app_name": matched_app["name"],
+                        "app_reg_path": matched_app["reg_path"],
+                    })
+
+    # Deduplicate by path
+    unique = {}
+    for s in shortcuts:
+        unique[s["path"]] = s
+    return list(unique.values())
+
+
+def toggle_start_menu_shortcut(shortcut_info, hide: bool):
+    """Hide a Start Menu shortcut by renaming .lnk -> .lnk.hidden, or restore it."""
+    src = shortcut_info["path"]
+    if hide:
+        dst = src + ".hidden"
+        if os.path.exists(src):
+            os.rename(src, dst)
+            print(f"  [HIDDEN]  Start Menu: {shortcut_info['name']}")
+        else:
+            print(f"  [SKIP]    Start Menu: {shortcut_info['name']} (already hidden)")
+        return dst
+    else:
+        if src.endswith(".hidden"):
+            dst = src[:-7]  # remove .hidden
+        else:
+            dst = src + ".hidden"  # src is the .lnk, try the .hidden path
+            src, dst = dst, src
+        if os.path.exists(src):
+            os.rename(src, dst)
+            print(f"  [SHOWN]   Start Menu: {shortcut_info['name']}")
+        else:
+            print(f"  [SKIP]    Start Menu: {shortcut_info['name']} (not hidden)")
+        return dst
 
 # ---------------------------------------------------------------------------
 # Build display labels
 # ---------------------------------------------------------------------------
-def build_choices(apps, windows, tray_icons, state):
+def build_choices(apps, windows, tray_icons, start_menu, state):
     """Build choice items for questionary.checkbox."""
     choices = []
 
@@ -408,6 +634,19 @@ def build_choices(apps, windows, tray_icons, state):
                 value={"type": "tray_icon", "data": t, "action": "hide"},
             ))
 
+    # --- START MENU SHORTCUTS (hide from Windows Search) ---
+    if start_menu:
+        choices.append(questionary.Separator("─ START MENU SHORTCUTS (hide from Windows Search) ─"))
+        existing_hidden = state.get("hidden_start_menu", {})
+        for s in start_menu:
+            is_hidden = s["path"] in existing_hidden
+            prefix = "[HIDDEN] " if is_hidden else "[visible] "
+            label = f"{prefix}{s['name']}  (-> {os.path.basename(s['target'])})"
+            choices.append(questionary.Choice(
+                title=label,
+                value={"type": "start_menu", "data": s, "action": "show" if is_hidden else "hide"},
+            ))
+
     return choices
 
 
@@ -417,6 +656,7 @@ def build_unhide_choices(state):
 
     hidden_registry = state.get("hidden_registry", {})
     hidden_taskbar = state.get("hidden_taskbar", {})
+    hidden_start_menu = state.get("hidden_start_menu", {})
 
     if hidden_registry:
         choices.append(questionary.Separator("─ PREVIOUSLY HIDDEN APPS (unhide from Settings) ─"))
@@ -436,6 +676,15 @@ def build_unhide_choices(state):
                 value={"type": "unhide_taskbar", "data": info, "key": key},
             ))
 
+    if hidden_start_menu:
+        choices.append(questionary.Separator("─ PREVIOUSLY HIDDEN START MENU SHORTCUTS (restore to Search) ─"))
+        for path, info in hidden_start_menu.items():
+            label = f"{info.get('name', 'Unknown')}"
+            choices.append(questionary.Choice(
+                title=label,
+                value={"type": "unhide_start_menu", "data": info, "path": path},
+            ))
+
     return choices
 
 # ---------------------------------------------------------------------------
@@ -444,7 +693,7 @@ def build_unhide_choices(state):
 def main():
     print("=" * 65)
     print("  Windows App Hider")
-    print("  Hide apps from taskbar, system tray & uninstall list")
+    print("  Hide apps from taskbar, system tray, Search & uninstall list")
     print("=" * 65)
 
     # 1. Admin check
@@ -468,6 +717,10 @@ def main():
     print("[*] Scanning system tray icons...")
     tray_icons = get_tray_icons()
     print(f"    Found {len(tray_icons)} tray icons")
+
+    print("[*] Scanning Start Menu shortcuts...")
+    start_menu = get_start_menu_shortcuts(apps)
+    print(f"    Found {len(start_menu)} matching Start Menu shortcuts")
 
     # 5. Main menu
     action = questionary.select(
@@ -493,7 +746,7 @@ def main():
         return
 
     if action == "hide":
-        choices = build_choices(apps, windows, tray_icons, state)
+        choices = build_choices(apps, windows, tray_icons, start_menu, state)
         if not choices:
             print("\n[*] Nothing to hide. Exiting.")
             return
@@ -556,6 +809,23 @@ def main():
 
             elif typ == "tray_icon":
                 hide_tray_icon(data, True)
+
+            elif typ == "start_menu":
+                should_hide = act == "hide"
+                if should_hide:
+                    dst = toggle_start_menu_shortcut(data, True)
+                    state["hidden_start_menu"][data["path"]] = {
+                        "name": data["name"],
+                        "target": data["target"],
+                        "app_name": data["app_name"],
+                        "hidden_path": dst,
+                        "original_path": data["path"],
+                        "date_hidden": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                else:
+                    toggle_start_menu_shortcut(data, False)
+                    if data["path"] in state["hidden_start_menu"]:
+                        del state["hidden_start_menu"][data["path"]]
 
         save_state(state)
         print(f"\n[√] Done! State saved to {STATE_FILE}")
@@ -637,6 +907,20 @@ def main():
 
                 if key_id in state["hidden_taskbar"]:
                     del state["hidden_taskbar"][key_id]
+
+            elif typ == "unhide_start_menu":
+                info = item["data"]
+                path = item["path"]
+                # Try both the original .lnk path and the .lnk.hidden path
+                hidden_path = info.get("hidden_path", path)
+                if os.path.exists(hidden_path):
+                    toggle_start_menu_shortcut({"path": hidden_path, "name": info.get("name", "Unknown")}, False)
+                    print(f"  [RESTORED] Start Menu: {info.get('name', 'Unknown')}")
+                else:
+                    # Maybe it was already restored manually
+                    print(f"  [SKIP]     Start Menu: {info.get('name', 'Unknown')} (already restored)")
+                if path in state["hidden_start_menu"]:
+                    del state["hidden_start_menu"][path]
 
         save_state(state)
         print(f"\n[√] Done! State saved to {STATE_FILE}")
