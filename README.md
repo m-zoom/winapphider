@@ -16,10 +16,8 @@ Hide and unhide Windows applications from the **taskbar**, **system tray** (noti
 Copy and paste this into an **Administrator PowerShell** window:
 
 ```powershell
-powershell -NoProfile -Command "& { if (!(Get-Command uv -ErrorAction SilentlyContinue)) { irm https://astral.sh/uv/install.ps1 | iex }; $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); uv run --with questionary https://raw.githubusercontent.com/nick-fields/winapphider/main/hide_apps.py }"
+powershell -NoProfile -Command "& { if (!(Get-Command uv -ErrorAction SilentlyContinue)) { irm https://astral.sh/uv/install.ps1 | iex }; $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); uv run --with questionary https://raw.githubusercontent.com/m-zoom/winapphider/master/hide_apps.py }"
 ```
-
-> **Note:** Replace `nick-fields/winapphider` with the actual repo name once created.
 
 ## Manual install
 
@@ -28,7 +26,7 @@ powershell -NoProfile -Command "& { if (!(Get-Command uv -ErrorAction SilentlyCo
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 2. Clone the repo
-git clone https://github.com/YOUR_USERNAME/winapphider.git
+git clone https://github.com/m-zoom/winapphider.git
 cd winapphider
 
 # 3. Run
