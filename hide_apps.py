@@ -127,7 +127,7 @@ def load_state():
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"hidden_registry": {}, "hidden_taskbar": {}, "hidden_start_menu": {}}
+    return {"hidden_registry": {}, "hidden_taskbar": {}, "hidden_start_menu": {}, "hidden_pinned_taskbar": {}}
 
 
 def save_state(state):
@@ -565,16 +565,16 @@ def get_start_menu_shortcuts(apps):
     return list(unique.values())
 
 
-def toggle_start_menu_shortcut(shortcut_info, hide: bool):
-    """Hide a Start Menu shortcut by renaming .lnk -> .lnk.hidden, or restore it."""
+def toggle_start_menu_shortcut(shortcut_info, hide: bool, label="Start Menu"):
+    """Hide a shortcut by renaming .lnk -> .lnk.hidden, or restore it."""
     src = shortcut_info["path"]
     if hide:
         dst = src + ".hidden"
         if os.path.exists(src):
             os.rename(src, dst)
-            print(f"  [HIDDEN]  Start Menu: {shortcut_info['name']}")
+            print(f"  [HIDDEN]  {label}: {shortcut_info['name']}")
         else:
-            print(f"  [SKIP]    Start Menu: {shortcut_info['name']} (already hidden)")
+            print(f"  [SKIP]    {label}: {shortcut_info['name']} (already hidden)")
         return dst
     else:
         if src.endswith(".hidden"):
@@ -584,15 +584,80 @@ def toggle_start_menu_shortcut(shortcut_info, hide: bool):
             src, dst = dst, src
         if os.path.exists(src):
             os.rename(src, dst)
-            print(f"  [SHOWN]   Start Menu: {shortcut_info['name']}")
+            print(f"  [SHOWN]   {label}: {shortcut_info['name']}")
         else:
-            print(f"  [SKIP]    Start Menu: {shortcut_info['name']} (not hidden)")
+            print(f"  [SKIP]    {label}: {shortcut_info['name']} (not hidden)")
         return dst
+
+# ---------------------------------------------------------------------------
+# Pinned Taskbar - Unpin from taskbar
+# ---------------------------------------------------------------------------
+
+def _get_pinned_taskbar_dir():
+    """Return the pinned taskbar shortcuts directory."""
+    path = os.path.join(
+        os.environ.get("APPDATA", ""),
+        r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar",
+    )
+    return path if os.path.isdir(path) else None
+
+
+def get_pinned_taskbar_shortcuts(apps):
+    """Find pinned taskbar shortcuts linked to any of the given installed apps."""
+    shortcuts = []
+    if not apps:
+        return shortcuts
+
+    taskbar_dir = _get_pinned_taskbar_dir()
+    if not taskbar_dir:
+        return shortcuts
+
+    try:
+        for f in os.listdir(taskbar_dir):
+            if not f.lower().endswith(".lnk"):
+                continue
+            full_path = os.path.join(taskbar_dir, f)
+            shortcut_name = f[:-4]  # without .lnk
+
+            target = _resolve_shortcut_target(full_path)
+            if not target:
+                continue
+
+            target_basename = os.path.splitext(os.path.basename(target))[0].lower()
+            target_dir = os.path.dirname(target).lower()
+
+            # Match: shortcut name or target contains an app name/word
+            matched_app = None
+            name_lower = shortcut_name.lower()
+            for a in apps:
+                app_name_lower = a["name"].lower()
+                if app_name_lower in name_lower or app_name_lower in target_dir or app_name_lower in target_basename:
+                    matched_app = a
+                    break
+                for word in app_name_lower.split():
+                    if len(word) > 3 and (word in name_lower or word in target_basename):
+                        matched_app = a
+                        break
+                if matched_app:
+                    break
+
+            if matched_app:
+                shortcuts.append({
+                    "path": full_path,
+                    "name": shortcut_name,
+                    "target": target,
+                    "app_name": matched_app["name"],
+                    "app_reg_path": matched_app["reg_path"],
+                })
+    except OSError:
+        pass
+
+    return shortcuts
 
 # ---------------------------------------------------------------------------
 # Build display labels
 # ---------------------------------------------------------------------------
-def build_choices(apps, windows, tray_icons, start_menu, state):
+def build_choices(apps, windows, tray_icons, start_menu, pinned_taskbar, state):
     """Build choice items for questionary.checkbox."""
     choices = []
 
@@ -622,6 +687,19 @@ def build_choices(apps, windows, tray_icons, start_menu, state):
             choices.append(questionary.Choice(
                 title=label,
                 value={"type": "running_window", "data": w, "action": "show" if is_hidden else "hide"},
+            ))
+
+    # --- PINNED TASKBAR (static pinned shortcuts) ---
+    if pinned_taskbar:
+        choices.append(questionary.Separator("─ PINNED TASKBAR (unpin from taskbar) ─"))
+        existing_hidden_pt = state.get("hidden_pinned_taskbar", {})
+        for p in pinned_taskbar:
+            is_hidden = p["path"] in existing_hidden_pt
+            prefix = "[HIDDEN] " if is_hidden else "[pinned] "
+            label = f"{prefix}{p['name']}  (-> {os.path.basename(p['target'])})"
+            choices.append(questionary.Choice(
+                title=label,
+                value={"type": "pinned_taskbar", "data": p, "action": "show" if is_hidden else "hide"},
             ))
 
     # --- SYSTEM TRAY ICONS ---
@@ -657,6 +735,7 @@ def build_unhide_choices(state):
     hidden_registry = state.get("hidden_registry", {})
     hidden_taskbar = state.get("hidden_taskbar", {})
     hidden_start_menu = state.get("hidden_start_menu", {})
+    hidden_pinned_taskbar = state.get("hidden_pinned_taskbar", {})
 
     if hidden_registry:
         choices.append(questionary.Separator("─ PREVIOUSLY HIDDEN APPS (unhide from Settings) ─"))
@@ -683,6 +762,15 @@ def build_unhide_choices(state):
             choices.append(questionary.Choice(
                 title=label,
                 value={"type": "unhide_start_menu", "data": info, "path": path},
+            ))
+
+    if hidden_pinned_taskbar:
+        choices.append(questionary.Separator("─ PREVIOUSLY HIDDEN PINNED TASKBAR (restore pin) ─"))
+        for path, info in hidden_pinned_taskbar.items():
+            label = f"{info.get('name', 'Unknown')}"
+            choices.append(questionary.Choice(
+                title=label,
+                value={"type": "unhide_pinned_taskbar", "data": info, "path": path},
             ))
 
     return choices
@@ -722,6 +810,10 @@ def main():
     start_menu = get_start_menu_shortcuts(apps)
     print(f"    Found {len(start_menu)} matching Start Menu shortcuts")
 
+    print("[*] Scanning pinned taskbar shortcuts...")
+    pinned_taskbar = get_pinned_taskbar_shortcuts(apps)
+    print(f"    Found {len(pinned_taskbar)} pinned taskbar matches")
+
     # 5. Main menu
     action = questionary.select(
         "What would you like to do?",
@@ -746,7 +838,7 @@ def main():
         return
 
     if action == "hide":
-        choices = build_choices(apps, windows, tray_icons, start_menu, state)
+        choices = build_choices(apps, windows, tray_icons, start_menu, pinned_taskbar, state)
         if not choices:
             print("\n[*] Nothing to hide. Exiting.")
             return
@@ -826,6 +918,23 @@ def main():
                     toggle_start_menu_shortcut(data, False)
                     if data["path"] in state["hidden_start_menu"]:
                         del state["hidden_start_menu"][data["path"]]
+
+            elif typ == "pinned_taskbar":
+                should_hide = act == "hide"
+                if should_hide:
+                    dst = toggle_start_menu_shortcut(data, True, label="Pinned Taskbar")
+                    state["hidden_pinned_taskbar"][data["path"]] = {
+                        "name": data["name"],
+                        "target": data["target"],
+                        "app_name": data["app_name"],
+                        "hidden_path": dst,
+                        "original_path": data["path"],
+                        "date_hidden": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                else:
+                    toggle_start_menu_shortcut(data, False, label="Pinned Taskbar")
+                    if data["path"] in state["hidden_pinned_taskbar"]:
+                        del state["hidden_pinned_taskbar"][data["path"]]
 
         save_state(state)
         print(f"\n[√] Done! State saved to {STATE_FILE}")
@@ -921,6 +1030,18 @@ def main():
                     print(f"  [SKIP]     Start Menu: {info.get('name', 'Unknown')} (already restored)")
                 if path in state["hidden_start_menu"]:
                     del state["hidden_start_menu"][path]
+
+            elif typ == "unhide_pinned_taskbar":
+                info = item["data"]
+                path = item["path"]
+                hidden_path = info.get("hidden_path", path)
+                if os.path.exists(hidden_path):
+                    toggle_start_menu_shortcut({"path": hidden_path, "name": info.get("name", "Unknown")}, False, label="Pinned Taskbar")
+                    print(f"  [RESTORED] Pinned Taskbar: {info.get('name', 'Unknown')}")
+                else:
+                    print(f"  [SKIP]     Pinned Taskbar: {info.get('name', 'Unknown')} (already restored)")
+                if path in state["hidden_pinned_taskbar"]:
+                    del state["hidden_pinned_taskbar"][path]
 
         save_state(state)
         print(f"\n[√] Done! State saved to {STATE_FILE}")

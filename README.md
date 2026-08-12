@@ -1,12 +1,14 @@
 # WinAppHider
 
-Hide and unhide Windows applications from the **taskbar**, **system tray** (notification area overflow), and **Settings > Apps & Features** uninstall list — without uninstalling them.
+Hide and unhide Windows applications from the **taskbar** (including pinned items), **system tray** (notification area overflow), **Windows Search** (Start Menu), and **Settings > Apps & Features** uninstall list — without uninstalling them.
 
 ## What it does
 
 - Lists all installed applications (from registry)
 - Lists all running windows visible in the taskbar
+- Lists pinned taskbar shortcuts
 - Lists system tray icons (notification area + overflow)
+- Lists Start Menu shortcuts (affects Windows Search results)
 - Interactive multi-select UI (arrow keys + spacebar)
 - Hides selected items so they disappear from Windows UI
 - Run again to unhide/restore previously hidden apps
@@ -38,8 +40,10 @@ uv run --with questionary hide_apps.py
 | Hide from | Technique |
 |-----------|-----------|
 | **Uninstall list** (Settings > Apps) | Sets `SystemComponent=1` in the app's registry key under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` |
-| **Taskbar** | Adds `WS_EX_TOOLWINDOW` to the window's extended style via `SetWindowLongW` |
-| **System tray** | Sends `TB_HIDEBUTTON` message to the notification area toolbar |
+| **Taskbar** | Adds `WS_EX_TOOLWINDOW` to the window's extended style via `SetWindowLongW` + `SetWindowPos(SWP_FRAMECHANGED)` |
+| **Pinned taskbar** | Renames `.lnk` shortcuts in `%APPDATA%\...\User Pinned\TaskBar` to `.lnk.hidden` |
+| **System tray** | Sends `TB_HIDEBUTTON` message to the notification area toolbar + `Shell_NotifyIcon(NIM_MODIFY, NIS_HIDDEN)` |
+| **Windows Search** | Renames Start Menu `.lnk` shortcuts to `.lnk.hidden` so Windows Search no longer indexes them |
 
 All changes are trackable and reversible. State is saved to `.app_hider_state.json`.
 
