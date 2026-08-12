@@ -498,10 +498,15 @@ def main():
             print("\n[*] Nothing to hide. Exiting.")
             return
 
+        print("\n" + "=" * 65)
+        print("  HOW TO SELECT: Use ARROW KEYS to move, SPACE to check/uncheck,")
+        print("  then press ENTER when you're done selecting.")
+        print("=" * 65)
+
         selected = questionary.checkbox(
-            "Select items to HIDE (SPACE to select, ENTER to confirm):",
+            "Select items to HIDE:",
             choices=choices,
-            instruction="(Use arrow keys to move, SPACE to select/deselect, ENTER to confirm)",
+            instruction="(ARROW keys = move | SPACE = select | ENTER = confirm)",
         ).ask()
 
         if not selected:
@@ -561,10 +566,15 @@ def main():
             print("\n[*] No previously hidden items found.")
             return
 
+        print("\n" + "=" * 65)
+        print("  HOW TO SELECT: Use ARROW KEYS to move, SPACE to check/uncheck,")
+        print("  then press ENTER when you're done selecting.")
+        print("=" * 65)
+
         selected = questionary.checkbox(
             "Select items to UNHIDE / RESTORE:",
             choices=unhide_choices,
-            instruction="(Use arrow keys to move, SPACE to select, ENTER to confirm)",
+            instruction="(ARROW keys = move | SPACE = select | ENTER = confirm)",
         ).ask()
 
         if not selected:
