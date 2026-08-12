@@ -1,0 +1,7 @@
+.app_hider_state.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.vscode/
+.idea/
