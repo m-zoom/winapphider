@@ -13,6 +13,8 @@ import os
 import sys
 import time
 
+import questionary
+
 # ---------------------------------------------------------------------------
 # Windows API constants
 # ---------------------------------------------------------------------------
@@ -454,17 +456,7 @@ def main():
     # 2. Load state
     state = load_state()
 
-    # 3. Import questionary
-    try:
-        import questionary
-    except ImportError:
-        print("\n[X] 'questionary' package is required.")
-        print("    Install it with: pip install questionary")
-        print("    Or use: uv run --with questionary hide_apps.py")
-        input("\nPress Enter to exit...")
-        sys.exit(1)
-
-    # 4. Scan system
+    # 3. Scan system
     print("\n[*] Scanning installed applications...")
     apps = get_installed_apps()
     print(f"    Found {len(apps)} installed apps")
