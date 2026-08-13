@@ -248,7 +248,7 @@ def run_as_admin():
 
 
 def looks_like_fs_path(p):
-    if not p or len(p) < 3:
+    if not isinstance(p, str) or len(p) < 3:
         return False
     if p.startswith("\\\\"):
         return True
@@ -296,7 +296,14 @@ $ProgressPreference = 'SilentlyContinue'
 $Payload = @()
 if (Test-Path -LiteralPath $InFile) {
     $raw = Get-Content -LiteralPath $InFile -Raw -Encoding UTF8
-    if ($raw -and $raw.Trim()) { $Payload = @(ConvertFrom-Json $raw) }
+    # Windows PowerShell 5.1 hands the decoded array back as a single object,
+    # so @(ConvertFrom-Json '["a","b"]') has Count 1 and every foreach below
+    # would run once with $p bound to the whole array. Piping through
+    # ForEach-Object forces real enumeration, and still yields a one-element
+    # list for a lone object or string.
+    if ($raw -and $raw.Trim()) {
+        $Payload = @(ConvertFrom-Json $raw | ForEach-Object { $_ })
+    }
 }
 function Emit($o) {
     if ($null -eq $o) { $o = @() }
@@ -663,8 +670,11 @@ def scan_shortcuts():
 
     resolved = {}
     for row in ps_json(PS_RESOLVE, [f["path"] for f in found]):
-        if isinstance(row, dict) and row.get("path"):
-            resolved[norm(row["path"]) or row["path"]] = row
+        if not isinstance(row, dict):
+            continue
+        p = row.get("path")
+        if isinstance(p, str) and p:
+            resolved[norm(p) or p] = row
 
     for f in found:
         info = resolved.get(norm(f["path"]), {})
@@ -1181,8 +1191,9 @@ def hide_app(group, state, hide_exe_file=False):
                 "name": p["name"],
             })
 
-        results = {r.get("path"): r for r in
-                   ps_json(PS_UNPIN_LNK, [p["path"] for p in pins])}
+        results = {r["path"]: r for r in
+                   ps_json(PS_UNPIN_LNK, [p["path"] for p in pins])
+                   if isinstance(r, dict) and isinstance(r.get("path"), str)}
         verb_worked = False
         for p in pins:
             r = results.get(p["path"]) or {}
